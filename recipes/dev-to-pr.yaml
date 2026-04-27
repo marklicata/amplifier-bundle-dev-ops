@@ -1,0 +1,138 @@
+name: dev-to-pr
+description: STAGE ONE — Complete dev-to-PR workflow (test generation → review → fixes → docs → PR)
+version: 1.0.0
+
+steps:
+  - name: assess-changes
+    description: Understand what changed and scope of work
+    instruction: |
+      Analyze the current git diff to understand what changed:
+      1. What files were modified/added/deleted?
+      2. What features or fixes are included?
+      3. What testing will be needed?
+      
+      Provide a concise summary of the change scope.
+    
+  - name: generate-tests
+    description: Generate comprehensive test suite for changes
+    instruction: |
+      Based on the changes, generate or update tests:
+      
+      1. Unit tests for new functions/classes
+      2. Integration tests for API endpoints
+      3. E2E tests for user workflows
+      
+      Use foundation:test-coverage to identify gaps and generate tests.
+      Store tests in appropriate directories following project conventions.
+      
+      Report: What tests were generated and where they're located.
+
+  - name: run-initial-tests
+    description: Run test suite to establish baseline
+    instruction: |
+      Run the full test suite:
+      - Type checks (tsc, pyright, etc.)
+      - Linting
+      - Unit tests
+      - Integration tests
+      
+      Document:
+      - Total tests run
+      - Pass count
+      - Failure count (if any)
+      - Any issues found
+      
+      If failures exist, document them for the review step.
+
+  - name: code-review
+    description: Systematic code review with specialized agents
+    instruction: |
+      Conduct parallel code review using two specialist agents:
+      
+      1. Delegate to foundation:zen-architect:
+         "Review all changes for:
+          - Philosophy compliance (ruthless simplicity)
+          - Design patterns and architecture
+          - Potential improvements
+          Categorize issues: HIGH, MEDIUM, LOW priority"
+      
+      2. Delegate to foundation:bug-hunter:
+         "Review all changes for:
+          - Potential bugs
+          - Edge cases
+          - Error handling gaps
+          Categorize: CRITICAL, HIGH, MEDIUM, LOW"
+      
+      Collect both reviews and create a consolidated findings report:
+      - CRITICAL issues (must fix)
+      - HIGH priority issues (should fix)
+      - MEDIUM/LOW issues (document for follow-up)
+      
+      Output: Structured findings report with priority categorization.
+
+  - name: apply-fixes
+    description: Fix high-priority issues from code review
+    instruction: |
+      Review the code review findings.
+      
+      Fix all CRITICAL and HIGH priority issues:
+      1. Use foundation:modular-builder to implement each fix
+      2. Run tests after each fix
+      3. Verify the fix doesn't introduce new issues
+      
+      For each issue fixed:
+      - Document what was changed
+      - Verify tests pass
+      - Confirm the issue is resolved
+      
+      For MEDIUM/LOW issues not fixed:
+      - Create GitHub issues to track them
+      - Link them in the PR description
+      
+      Output: Summary of fixes applied and issues created.
+
+  - name: update-tests
+    description: Update tests based on fixes
+    instruction: |
+      After applying fixes, verify test suite is still valid:
+      
+      1. Run full test suite again
+      2. Update any tests broken by fixes
+      3. Add new tests if fixes revealed gaps
+      
+      Use foundation:test-coverage to ensure coverage remains comprehensive.
+      
+      Output: Final test count and pass rate (must be 100%).
+
+  - name: update-documentation
+    description: Update documentation for changes
+    instruction: |
+      Update all relevant documentation:
+      
+      1. API changes → Update OpenAPI/Swagger specs
+      2. New features → Update README
+      3. Breaking changes → Update CHANGELOG
+      4. Configuration changes → Update config docs
+      
+      Verify documentation is accurate and complete.
+      
+      Output: List of documentation files updated.
+
+  - name: create-pr
+    description: Create pull request with comprehensive context
+    instruction: |
+      Use foundation:git-ops to create the PR:
+      
+      1. Commit all changes with semantic commit message
+      2. Push to new branch (feature/description-here)
+      3. Open PR with comprehensive description including:
+         - What changed (feature summary)
+         - Tests added (count and types)
+         - Issues found and fixed
+         - Issues documented but not fixed (with links)
+         - Review findings summary
+         - Test results (pass count)
+      
+      PR title format: "feat: <description>" or "fix: <description>"
+      
+      Output: PR URL and summary of what was included.

@@ -1,0 +1,14 @@
+bundle:
+  name: dev-ops-behavior
+  version: 1.0.0
+  description: Adds DevOps methodology agents and awareness context
+
+agents:
+  include:
+    - dev-ops:agents/pr-orchestrator
+    - dev-ops:agents/methodology-expert
+    - dev-ops:agents/workflow-coach
+
+context:
+  include:
+    - dev-ops:context/devops-awareness.md
