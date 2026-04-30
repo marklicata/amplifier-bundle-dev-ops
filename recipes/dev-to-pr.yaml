@@ -1,6 +1,6 @@
 name: dev-to-pr
 description: STAGE ONE — Complete dev-to-PR workflow (test generation → review → fixes → docs → PR)
-version: 1.0.0
+version: 1.1.0
 
 steps:
   - name: assess-changes
@@ -118,6 +118,35 @@ steps:
       
       Output: List of documentation files updated.
 
+
+  - name: generate-e2e-tests
+    description: Create E2E test documentation for manual verification
+    instruction: |
+      Create a comprehensive E2E test guide so the user can manually verify functionality:
+      
+      1. Analyze all changes made in this feature
+      2. Identify key user-facing functionality and integration points
+      3. Create docs/E2E_<FEATURE_NAME>_TESTS.md with:
+         - Prerequisites (environment setup, required config)
+         - 8-12 test cases covering:
+           * Happy path scenarios (core functionality works)
+           * Error handling (wrong inputs, missing config)
+           * Edge cases (boundary conditions, special states)
+           * Integration flows (multiple components working together)
+           * Performance verification (if applicable)
+           * Security verification (if applicable)
+         - Each test case must include:
+           * Clear objective (what you're verifying)
+           * Step-by-step instructions (exactly what to do)
+           * Expected results (what success looks like)
+           * Verification commands (how to confirm it worked)
+           * Troubleshooting tips (what to check if it fails)
+         - Common issues section with debugging tips
+         - Success criteria checklist
+      
+      Use clear formatting with emojis for readability (✅ ❌ ⚠️ 🔒 🔄 etc.)
+      
+      Output: Path to E2E test document created.
   - name: create-pr
     description: Create pull request with comprehensive context
     instruction: |
@@ -132,6 +161,7 @@ steps:
          - Issues documented but not fixed (with links)
          - Review findings summary
          - Test results (pass count)
+         - Link to E2E test documentation
       
       PR title format: "feat: <description>" or "fix: <description>"
       
