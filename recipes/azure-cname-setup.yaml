@@ -1,0 +1,304 @@
+name: azure-cname-setup
+description: Complete Azure custom domain (CNAME) setup for Container Apps - hybrid manual/automated workflow with DNS approval gates
+version: 1.0.0
+
+# Context variables required
+context:
+  container_app_name: null  # Name of the Container App
+  resource_group: null      # Resource group name
+  custom_domain: null       # Desired custom domain (e.g., myapp.microsoft.com)
+
+# Staged recipe with approval gates for manual DNS steps
+stages:
+  - name: preparation
+    description: Gather prerequisites and verify setup is ready
+    approval_required: false
+    steps:
+      - name: verify-prerequisites
+        description: Check Azure CLI access and Container App status
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Verify the prerequisites for custom domain setup:
+          
+          1. Check Azure CLI is authenticated:
+             az account show
+          
+          2. Verify Container App exists and is running:
+             az containerapp show \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}}
+          
+          3. Get the default FQDN (needed for CNAME target):
+             az containerapp show \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}} \
+               --query properties.configuration.ingress.fqdn -o tsv
+          
+          4. Store the FQDN in context for later use.
+          
+          Output:
+          - ✅ Azure CLI authenticated
+          - ✅ Container App found and running
+          - ✅ Default FQDN: <fqdn-value>
+        
+        update_context:
+          default_fqdn: "{{agent_output}}"
+  
+  - name: dns-request
+    description: Request CNAME and TXT records via Microsoft internal DNS portal
+    approval_required: true
+    approval_message: |
+      🌐 **DNS Request Stage**
+      
+      You need to manually request DNS records via Microsoft's internal portal.
+      
+      **Actions required:**
+      
+      1. **Check CNAME availability:**
+         - Go to: https://prod.msftdomains.com/Management/OwnerLookup
+         - Search for: {{custom_domain}}
+         - Verify it's available
+      
+      2. **Request CNAME record:**
+         - Go to: https://prod.msftdomains.com/Dns/Form/
+         - Request Type: CNAME
+         - CNAME name: {{custom_domain}}
+         - Target: {{default_fqdn}}
+         - Submit request
+      
+      ⏰ **Timeline:** DNS approval typically takes 1 hour - 3 days
+      
+      When the CNAME request is **approved and active**, type 'approve' to continue.
+    
+    steps:
+      - name: verify-cname-active
+        description: Verify CNAME is resolving correctly
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Verify the CNAME record is active and resolving:
+          
+          1. Check CNAME resolution:
+             nslookup {{custom_domain}}
+          
+          2. Verify it resolves to the Container App FQDN:
+             Expected: {{default_fqdn}}
+          
+          3. If not resolving, wait longer or check DNS request status.
+          
+          Output:
+          - ✅ CNAME resolves to correct target
+          - OR ⏳ Waiting for DNS propagation (retry in 15 minutes)
+  
+  - name: azure-configuration
+    description: Add custom domain to Container App and get verification TXT value
+    approval_required: false
+    steps:
+      - name: add-custom-domain
+        description: Add custom domain to Container App
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Add the custom domain to the Container App:
+          
+          1. Add the hostname:
+             az containerapp hostname add \
+               --hostname {{custom_domain}} \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}}
+          
+          2. Get the domain verification details:
+             az containerapp hostname list \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}}
+          
+          3. Extract the TXT verification value (if provided by Azure).
+          
+          Output:
+          - ✅ Custom domain added to Container App
+          - TXT verification value (if required): <txt-value>
+        
+        update_context:
+          txt_verification_value: "{{agent_output}}"
+  
+  - name: txt-verification
+    description: Request TXT record for domain verification (if required)
+    approval_required: true
+    approval_message: |
+      🔐 **TXT Verification Stage**
+      
+      Azure requires domain verification via a TXT record.
+      
+      **Actions required:**
+      
+      1. **Request TXT record:**
+         - Go to: https://prod.msftdomains.com/Dns/Form/
+         - Request Type: TXT
+         - Hostname: {{custom_domain}}
+         - TXT Value: {{txt_verification_value}}
+         - Submit request
+      
+      ⏰ **Timeline:** TXT record approval typically takes 1 hour - 3 days
+      
+      When the TXT request is **approved and active**, type 'approve' to continue.
+    
+    steps:
+      - name: verify-txt-active
+        description: Verify TXT record is active
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Verify the TXT record is active:
+          
+          1. Check TXT record:
+             nslookup -type=TXT {{custom_domain}}
+          
+          2. Verify it contains the verification value.
+          
+          3. Wait for Azure to verify the domain (may take a few minutes).
+          
+          4. Check verification status:
+             az containerapp hostname list \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}}
+          
+          Output:
+          - ✅ TXT record is active
+          - ✅ Domain verification status: Verified
+          - OR ⏳ Waiting for verification (retry in 5 minutes)
+  
+  - name: certificate-binding
+    description: Provision and bind SSL certificate to custom domain
+    approval_required: false
+    steps:
+      - name: get-environment-name
+        description: Get Container App Environment name
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Get the Container Apps Environment name:
+          
+          az containerapp show \
+            --name {{container_app_name}} \
+            --resource-group {{resource_group}} \
+            --query properties.environmentId -o tsv | \
+            grep -oP '(?<=environments/)[^/]+'
+          
+          Store this for certificate binding.
+        
+        update_context:
+          environment_name: "{{agent_output}}"
+      
+      - name: bind-certificate
+        description: Bind managed certificate to custom domain
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Bind a managed certificate to the custom domain:
+          
+          1. Bind the hostname with automatic certificate:
+             az containerapp hostname bind \
+               --hostname {{custom_domain}} \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}} \
+               --environment {{environment_name}} \
+               --validation-method CNAME
+          
+          2. Wait for certificate provisioning (can take 5-15 minutes).
+          
+          3. Verify certificate binding:
+             az containerapp hostname list \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}}
+          
+          Output:
+          - ✅ Certificate provisioned and bound
+          - Certificate status: <status>
+  
+  - name: verification
+    description: Verify custom domain is accessible and working
+    approval_required: false
+    steps:
+      - name: test-https-access
+        description: Test HTTPS access to custom domain
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Test that the custom domain is accessible:
+          
+          1. Test HTTPS endpoint:
+             curl -I https://{{custom_domain}}
+          
+          2. Verify:
+             - HTTP 200 OK response
+             - Valid SSL certificate
+             - No certificate warnings
+          
+          3. Test a specific endpoint (if known):
+             curl -I https://{{custom_domain}}/health
+          
+          Output:
+          - ✅ HTTPS access works
+          - ✅ Certificate is valid
+          - ✅ Application responds correctly
+      
+      - name: check-for-http-431
+        description: Check for HTTP 431 errors and apply fix if needed
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Check if HTTP 431 errors are occurring:
+          
+          1. Test with verbose output:
+             curl -v https://{{custom_domain}}
+          
+          2. If HTTP 431 (Request Header Fields Too Large) is returned:
+             Apply the fix:
+             
+             az containerapp update \
+               --name {{container_app_name}} \
+               --resource-group {{resource_group}} \
+               --set-env-vars "WEBSITE_AUTH_DISABLE_IDENTITY_FLOW=true"
+          
+          3. Re-test after applying fix.
+          
+          Output:
+          - ✅ No HTTP 431 errors
+          - OR ✅ HTTP 431 fix applied and verified
+  
+  - name: completion
+    description: Final verification and success summary
+    approval_required: false
+    steps:
+      - name: final-checklist
+        description: Run final verification checklist
+        agent: dev-ops:agents/cname-orchestrator
+        instruction: |
+          Run the final verification checklist:
+          
+          ✅ **Custom Domain Setup Complete**
+          
+          Verify all success criteria:
+          
+          1. **HTTPS Access:**
+             curl -I https://{{custom_domain}}
+             Expected: HTTP 200 OK
+          
+          2. **Certificate Valid:**
+             Check browser: https://{{custom_domain}}
+             Expected: No certificate warnings
+          
+          3. **Application Loads:**
+             Test key endpoints
+             Expected: Correct responses
+          
+          4. **No HTTP 431 Errors:**
+             Expected: All requests succeed
+          
+          **Configuration Summary:**
+          - Custom Domain: {{custom_domain}}
+          - Container App: {{container_app_name}}
+          - Resource Group: {{resource_group}}
+          - Default FQDN: {{default_fqdn}}
+          - Certificate: Managed certificate (auto-renews)
+          
+          **Next Steps:**
+          - Update any documentation referencing the default FQDN
+          - Update GitHub workflows to test the custom domain
+          - Monitor certificate expiration (managed certs auto-renew)
+          - Test the custom domain in staging/production workflows
+          
+          🎉 Custom domain setup is complete!

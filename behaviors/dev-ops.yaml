@@ -8,6 +8,7 @@ agents:
     - dev-ops:agents/pr-orchestrator
     - dev-ops:agents/methodology-expert
     - dev-ops:agents/workflow-coach
+    - dev-ops:agents/cname-orchestrator
 
 context:
   include:
