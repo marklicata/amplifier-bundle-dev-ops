@@ -470,29 +470,113 @@ az ad app show --id <client-id> --query "spa.redirectUris" -o table
 
 ---
 
+## Layered Auth: Easy Auth + Client-Side MSAL.js
+
+Easy Auth and client-side MSAL.js can coexist on the same Container App, and
+in practice that's what apps like Nexus actually do. The two layers serve
+different purposes and need **different redirect URIs** registered on the
+**same app registration**:
+
+| Layer | What it does | Redirect URI it uses |
+|-------|--------------|----------------------|
+| Easy Auth | Platform-level interception; sets `X-MS-CLIENT-PRINCIPAL-*` headers; gates the whole app behind sign-in | `https://<fqdn>/.auth/login/aad/callback` — registered under **Web** platform |
+| Client-side MSAL.js | Acquires fresh tokens for specific Graph / API scopes the SPA needs to call directly | Whatever the SPA passes as `redirectUri` (commonly `window.location.origin` → `https://<fqdn>`) — registered under **SPA** platform (PKCE) |
+
+If only the Easy Auth callback is registered, users sign in fine through Easy
+Auth but then hit AADSTS50011 the moment MSAL.js tries to acquire its own
+token — because the bare origin URL isn't in the SPA redirect list.
+
+### What to register when you layer them
+
+```bash
+APP_ID="<client-id>"
+OBJECT_ID=$(az ad app show --id "$APP_ID" --query id -o tsv)
+
+# Web platform — for Easy Auth callbacks
+az ad app update --id "$OBJECT_ID" \
+  --web-redirect-uris \
+    "https://your-app.com/.auth/login/aad/callback" \
+    "https://your-app-web.azurecontainerapps.io/.auth/login/aad/callback"
+
+# SPA platform — for MSAL.js loginRedirect / acquireTokenRedirect
+az ad app update --id "$OBJECT_ID" \
+  --spa-redirect-uris \
+    "https://your-app.com" \
+    "https://your-app.com/" \
+    "http://localhost:4173" \
+    "http://localhost:4173/auth/redirect"
+```
+
+Register both trailing-slash and no-slash variants of the SPA URI — some
+flows include the slash and you'll hit this same error a second time without
+it.
+
+**Why SPA platform specifically:** MSAL.js with `loginRedirect` and
+`acquireTokenSilent` uses PKCE and the browser's `fetch` to the token
+endpoint. Registering the redirect URI under Web instead of SPA yields
+AADSTS9002326 ("Cross-origin token redemption is permitted only for the
+'Single-Page Application' client-type").
+
+### Which client_id does the SPA actually send?
+
+Whatever was compiled into the bundle. If the framework is Vite, Next, CRA,
+or similar, the client ID was inlined at `npm run build` from a
+`VITE_*`/`NEXT_PUBLIC_*`/`REACT_APP_*` env var. Changing Container App env
+vars at runtime has no effect on the browser. See
+`@dev-ops:context/azure-deployment-patterns.md` Pattern 8 for the diagnostic
+(exec into the replica, grep the served bundle).
+
+---
+
 ## Troubleshooting
 
-### Issue: "Redirect URI mismatch" error
+### Issue: "Redirect URI mismatch" error (AADSTS50011)
 
 **Symptoms:** Users redirected to Entra ID but get an error after login
 
 **Causes:**
 - Redirect URI in Entra ID doesn't match the callback URL
-- Wrong format (missing `/.auth/login/aad/callback`)
+- Wrong format (missing `/.auth/login/aad/callback` for Easy Auth)
+- Wrong platform — registered under Web when the flow needs SPA, or vice versa
 - Protocol mismatch (http vs https)
+- **The browser is sending the wrong `client_id` entirely** — i.e. the app is rejecting `client_id=X`'s sign-in attempt because `X` has no redirect URIs, when your *intended* app is `Y`
 
-**Solution:**
+**First, identify which case you're in.** Open the failing flow in DevTools →
+Network, watch the request to `login.microsoftonline.com/.../oauth2/v2.0/authorize`,
+and read the `client_id` query parameter:
+
+- **`client_id` matches your intended app** → it's a redirect URI / platform / format issue. Use the solution below.
+- **`client_id` is something else** (e.g. your deployment service principal) → the SPA bundle was built with the wrong secret. The Entra portal can't fix this; you need to rebuild. See the build-time inlining diagnostic in `@dev-ops:context/azure-deployment-patterns.md` Pattern 8.
+
+**Solution (when the `client_id` is correct):**
 ```bash
-# Check current redirect URIs
-az ad app show --id <client-id> --query "{web:web.redirectUris, spa:spa.redirectUris}"
+# Check current redirect URIs on both platforms
+az ad app show --id <client-id> \
+  --query "{web:web.redirectUris, spa:spa.redirectUris}"
 
-# Ensure format is exactly:
-# https://<your-fqdn>/.auth/login/aad/callback
-
-# Update if needed
+# Easy Auth callbacks (format is fixed by the platform):
+# https://<fqdn>/.auth/login/aad/callback     ← register under Web
 az ad app update --id <object-id> \
   --web-redirect-uris "https://correct-url.com/.auth/login/aad/callback"
+
+# MSAL.js redirects (format is whatever your SPA passes):
+# typically https://<fqdn> and https://<fqdn>/  ← register under SPA
+az ad app update --id <object-id> \
+  --spa-redirect-uris "https://correct-url.com" "https://correct-url.com/"
 ```
+
+**Solution (when the `client_id` is wrong):**
+The build-time secret pointed at the wrong identity. Most common cause is
+reusing `AZURE_CLIENT_ID` (the deployment service principal) as the
+`VITE_*_APP_ID` build arg. Confirm by exec'ing into a running replica:
+```bash
+# Portal → Container App → Console → /bin/sh
+grep -roh '<expected-guid>\|<wrong-guid>' /app | sort -u
+```
+If the wrong GUID is there, use a separate GitHub secret for the user-facing
+app and trigger a new build with a fresh commit. Re-running the workflow on
+the same SHA is a no-op — see `@dev-ops:context/azure-deployment-patterns.md`
+Patterns 5 and 8.
 
 ### Issue: Authentication loops (redirects indefinitely)
 

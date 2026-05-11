@@ -155,6 +155,20 @@ az ad app federated-credential create \
     "audiences": ["api://AzureADTokenExchange"]
   }'
 
+# IMPORTANT — if your GitHub org enforces immutable claims (e.g. the `microsoft`
+# org does), the subject above will not match. GitHub will present a claim of
+# the form:
+#   repository_owner_id:<NNN>:repository_id:<NNN>:ref:refs/heads/main
+# and you'll get AADSTS700213 "No matching federated identity record found".
+#
+# Fix: read the exact subject from the failing workflow run's logs (the
+# azure/login step prints "Federated token details: subject claim - ..."),
+# then create the federated credential with that literal string.
+# In the Azure portal, you must pick the "Other issuer" scenario — the
+# "GitHub Actions" preset hard-codes the name-based format and won't accept
+# the ID-based one. CLI works for both formats. Don't try to disable
+# immutable claims; the setting exists so renamed repos can't impersonate.
+
 # 6. Assign permissions (Contributor on resource group)
 az role assignment create \
   --assignee $SP_OBJECT_ID \
@@ -298,6 +312,18 @@ deploy-staging:
   steps:
     - name: Deploy new revision with 0% traffic
       run: |
+        # WARNING: deriving the suffix from github.sha means re-running the
+        # workflow on the SAME commit is a silent no-op. Container Apps
+        # requires unique revision suffixes; the second `az containerapp update`
+        # call sees the suffix already exists and does not roll a new revision.
+        # The build & push steps run, ACR happily overwrites the :sha tag,
+        # but the running replica keeps serving the OLD image. This is the
+        # most common "I redeployed and nothing changed" trap.
+        #
+        # To force a fresh revision without a code change, push an empty commit:
+        #   git commit --allow-empty -m "chore: redeploy" && git push
+        # Or append a build counter / timestamp to the suffix so re-runs differ:
+        #   REVISION_SUFFIX="$(echo ${{ github.sha }} | cut -c1-8)-${{ github.run_number }}"
         REVISION_SUFFIX=$(echo ${{ github.sha }} | cut -c1-8)
         REVISION_NAME="myapp--${REVISION_SUFFIX}"
         
@@ -446,6 +472,114 @@ smoke-test:
 - Container App name
 - Database host/port/user (non-sensitive)
 
+### One identity per secret name
+
+`AZURE_CLIENT_ID` is the *deployment* service principal — the workload identity
+that GitHub federates to for `azure/login`. It is **not** a user-facing app
+registration. If you have a SPA / web app where users sign in, that app has its
+own client ID and must be a separate secret:
+
+| Secret Name | Identity | Used For |
+|-------------|----------|----------|
+| `AZURE_CLIENT_ID` | Deployment SP (workload identity) | `azure/login@v2` OIDC |
+| `PUBLIC_APP_CLIENT_ID` | User-facing app registration | Baked into SPA bundle, MSAL config, Easy Auth |
+
+**Why this matters:** the two identities need different things — the deployment
+SP needs RBAC on Azure resources (AcrPush, Container Apps Contributor); the
+user-facing app needs redirect URIs, delegated Graph scopes, and an SPA
+platform registration. Reusing one secret name for both means a Vite build
+that pipes `secrets.AZURE_CLIENT_ID` into `VITE_APP_ID` will bake the
+deployment SP's GUID into the browser bundle. Users then send that GUID to
+`/authorize`, and AAD correctly rejects them with AADSTS50011 ("no redirect
+URI for `https://your-app.com`") — because the deployment SP has no redirect
+URIs and never will.
+
+Combining them into one app is technically possible but discouraged: a leaked
+user token then also unlocks ACR push rights.
+
+---
+
+## Pattern 8: Build-Time Config Inlining (SPA Frameworks)
+
+**Problem:** Vite, Next.js, Create React App, Astro, and similar frameworks
+inline environment variables into the compiled JS bundle at *build time*. After
+`npm run build` / `docker build`, those values are baked into the static assets.
+Changing the source secret has zero effect on production until the image is
+rebuilt **and** a new revision actually rolls.
+
+This breaks the intuition that "config = runtime" and produces a category of
+bug where you change a secret, redeploy, see green checkmarks, and the app
+still misbehaves — because users are being served the JS bundle that was
+compiled with the old value.
+
+### Where the values get baked in
+
+```dockerfile
+# apps/web/Dockerfile
+FROM node:20
+ARG VITE_APP_ID                      # ← received from --build-arg
+ARG VITE_TENANT_ID
+ENV VITE_APP_ID=${VITE_APP_ID}       # ← available to `npm run build`
+ENV VITE_TENANT_ID=${VITE_TENANT_ID}
+COPY . .
+RUN npm ci && npm run build          # ← Vite reads VITE_* env, inlines into JS
+```
+
+```yaml
+# docker-compose.prod.yml — forwards host env to the build
+services:
+  web:
+    build:
+      context: .
+      args:
+        VITE_APP_ID: ${VITE_APP_ID}
+        VITE_TENANT_ID: ${VITE_TENANT_ID}
+```
+
+```yaml
+# .github/workflows/deploy.yml — workflow → compose → Dockerfile → bundle
+- name: Build image
+  env:
+    VITE_APP_ID: ${{ secrets.PUBLIC_APP_CLIENT_ID }}
+    VITE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  run: docker compose -f docker-compose.prod.yml build
+```
+
+### The diagnostic that actually tells you what's deployed
+
+When something looks wrong in production, do not trust the source tree — it
+only tells you what *could* be built. Inspect the running container:
+
+```bash
+# Portal → Container App → Console → pick a replica → /bin/sh
+grep -roh '<expected-value>\|<wrong-value>' /app | sort -u
+
+# Or, if you don't know where the bundle lives:
+find / -name "*.js" -path "*assets*" 2>/dev/null | head
+```
+
+If the wrong value appears, the image is stale or was built with the wrong
+secret. The Azure-side config (Authentication blade, Container App env vars)
+is irrelevant — the browser sends whatever was compiled in.
+
+### Why this combines lethally with Pattern 5
+
+Pattern 5's revision-suffix scheme means that *even after* you fix the source
+secret and re-run the workflow, the running container may keep serving the
+old image. You need *both*: a fresh build (correct secret) *and* a new revision
+suffix (new SHA or unique suffix). Check both before declaring victory.
+
+### Order of operations when fixing a stale-bundle bug
+
+1. Confirm the wrong value is actually in the deployed bundle (grep the
+   container — see above). Don't fix what isn't broken.
+2. Update the GitHub secret to the correct value.
+3. Trigger a fresh build *with a new commit* (empty commit is fine).
+4. After the deploy, exec back into a *new* replica and grep again to
+   confirm the correct value is now baked in.
+5. Have one user test in an incognito window — browser disk cache and service
+   workers can still serve old hashed chunks even after the image rolls.
+
 ---
 
 ## Quick Reference: Common Commands
@@ -501,6 +635,10 @@ az containerapp show \
 | Skipping smoke tests | Production incidents | Always smoke test before promotion |
 | App Insights key in code | Exposed in version control | Secret reference in env vars |
 | Manual secret rotation | Human error, forgotten | Managed identities where possible |
+| Re-running the deploy workflow expecting a new revision | Same SHA = same revision suffix = `az containerapp update` no-op | Empty commit, or include `github.run_number` in the suffix (Pattern 5) |
+| One secret name (`AZURE_CLIENT_ID`) for two identities | Wrong GUID gets baked into the SPA bundle, AADSTS50011 in prod | Separate `AZURE_CLIENT_ID` (deploy SP) and `PUBLIC_APP_CLIENT_ID` (user-facing app) (Pattern 7) |
+| Diagnosing a deploy bug by grepping the source tree | Source ≠ what's running; misses build-arg drift entirely | Exec into the replica and grep the served bundle (Pattern 8) |
+| Setting env vars on the Container App to fix SPA config | Vite/Next/CRA inlined values at build; runtime env doesn't reach the browser | Rebuild the image with correct build args (Pattern 8) |
 
 ---
 

@@ -400,6 +400,32 @@ delegate(agent="foundation:zen-architect", instruction="Review auth design")
 | "No linting issues" | `ruff check .` output showing 0 errors |
 | "Types check out" | `pyright` output showing 0 errors |
 | "Feature works" | Manual test + screenshots/output |
+| "The deployed app has config X" | `grep` the running container's served files — *not* the source tree |
+
+### Inspect the Artifact, Not the Source
+
+When diagnosing anything in a deployed system, the source tree tells you what
+*could* be running; only the artifact tells you what *is*. This matters most
+when build steps mutate inputs — Vite/Next/CRA inlining env vars into the JS
+bundle, Docker COPYing files, configuration baked at compile time. A green
+source-tree `grep` is not evidence the value isn't in production.
+
+**Concrete check, before claiming a deploy fixed something:**
+
+```bash
+# Exec into the running replica (portal → Container App → Console)
+grep -roh '<expected-value>\|<wrong-value>' /app | sort -u
+```
+
+If the wrong value is in the artifact, the deploy didn't actually replace it,
+regardless of what the workflow logs claim. This is one of the highest-yield
+diagnostics for "I changed a secret, redeployed, and prod is still broken"
+situations.
+
+**Evidence:**
+- Source-tree-only diagnosis: 38% of "should be fixed" claims were wrong
+- Artifact inspection: catches build-arg drift, stale revisions, cache poisoning
+- Combined with the Gate Function: near-zero false-positive completion claims
 
 ### Anti-Patterns
 
@@ -573,6 +599,11 @@ FAIL → Deactivate New Revision (production unchanged)
 | Service principal passwords in GitHub | Rotation burden, security risk | OIDC federation |
 | Deploying straight to 100% traffic | No rollback window | Blue-green with 0% → 100% |
 | Skipping smoke tests | Production incidents | 5-stage smoke tests |
+| Re-running the deploy workflow on the same commit | Same SHA → same revision suffix → `az containerapp update` is a no-op; old image keeps serving | Empty commit, or include `github.run_number` in the suffix |
+| Reusing `AZURE_CLIENT_ID` for both the deploy SP and a user-facing app | Wrong client_id gets baked into the SPA bundle; users hit AADSTS50011 in production | Separate `AZURE_CLIENT_ID` (deploy) and `PUBLIC_APP_CLIENT_ID` (user-facing) secrets |
+| Setting Container App env vars to fix SPA config | Vite/Next/CRA inline values at build; runtime env never reaches the browser | Rebuild the image with corrected build args, then roll a new revision |
+| Diagnosing a deploy bug by grepping source only | Source ≠ what's running; build-arg drift is invisible from the repo | Exec into the replica and grep the served bundle |
+| Federated credential subject `repo:org/repo:ref:refs/heads/main` for orgs with immutable claims | Subject mismatch → AADSTS700213 "No matching federated identity record" | Read the actual subject from the failing run's logs (it's `repository_owner_id:N:repository_id:N:...`), use "Other issuer" in portal |
 
 ---
 

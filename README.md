@@ -113,7 +113,9 @@ amplifier chat
 ### **1 Automated Recipe**
 - **dev-to-pr** — Complete STAGE ONE automation
 
-### **4 Skills**
+### **6 Skills**
+- **azure-auth-tokens** — Azure auth infrastructure: Easy Auth, MSAL, Container Apps token store, encryption, exclusion paths (353+ sessions)
+- **authenticated-tool-patterns** — How Amplifier modules leverage exchanged tokens for authenticated API flows (353+ sessions)
 - **dev-workflow** — Guided STAGE ONE walkthrough
 - **dev-patterns** — Reusable development patterns library
 - **azure-deployment** — Step-by-step Azure Container Apps setup
